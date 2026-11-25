@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#FFFFFF">
+<title>Medidor DC · Monitoreo MQTT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  :root{
+    color-scheme:light;
+    --bg:#F7F8FA; --panel:#FFFFFF; --line:#E8EBF0; --line-2:#F1F3F6;
+    --ink:#111827; --muted:#6B7280; --soft:#9CA3AF;
+    --accent:#2563EB; --accent-bg:#EFF4FF;
+    --teal:#0EA5A4; --teal-bg:#E6F7F6;
+    --orange:#F59E0B; --orange-d:#B45309; --amber-bg:#FFF7E6;
+    --violet:#7C3AED; --violet-bg:#F3EEFF;
+    --green:#16A34A; --green-bg:#EAF8EF;
+    --red:#DC2626; --red-bg:#FDECEC;
+    --radius:18px; --radius-s:11px;
+    --shadow:0 1px 2px rgba(16,24,40,.04),0 4px 16px rgba(16,24,40,.05);
+    --shadow-h:0 2px 4px rgba(16,24,40,.05),0 10px 28px rgba(16,24,40,.08);
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font-family:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;background:var(--bg);color:var(--ink);font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+
+  /* ---------- Encabezado ---------- */
+  header{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.82);backdrop-filter:saturate(180%) blur(14px);-webkit-backdrop-filter:saturate(180%) blur(14px);border-bottom:1px solid var(--line)}
+  .hwrap{max-width:1320px;margin:0 auto;padding:14px 28px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  .logo{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--teal));color:#fff;box-shadow:0 4px 12px rgba(37,99,235,.25)}
+  .logo svg{width:22px;height:22px}
+  header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:-.01em}
+  header .sub{color:var(--muted);font-size:13px}
+  .chips{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:13px;color:var(--ink);font-weight:500}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--soft);flex:none}
+  .dot.on{background:var(--green);box-shadow:0 0 0 3px rgba(22,163,74,.15)}
+  .dot.off{background:var(--red);box-shadow:0 0 0 3px rgba(220,38,38,.13)}
+  .dot.wait{background:var(--orange);box-shadow:0 0 0 3px rgba(245,158,11,.15)}
+
+  main{max-width:1320px;margin:0 auto;padding:26px 28px 56px;display:grid;gap:22px}
+
+  /* ---------- Tarjetas ---------- */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:22px;box-shadow:var(--shadow)}
+  .card h2{font-size:13px;margin:0 0 16px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  details.card summary{cursor:pointer;font-weight:600;list-style:none;display:flex;align-items:center;gap:10px}
+  details.card summary::-webkit-details-marker{display:none}
+  details.card summary::after{content:"";margin-left:auto;width:9px;height:9px;border-right:2px solid var(--soft);border-bottom:2px solid var(--soft);transform:rotate(45deg);transition:transform .2s}
+  details.card[open] summary::after{transform:rotate(225deg)}
+  details.card summary .hint{font-weight:400;color:var(--muted);font-size:13px}
+  .conn{display:grid;grid-template-columns:2fr 1fr auto;gap:14px;margin-top:18px;align-items:end}
+
+  /* ---------- Formularios y botones ---------- */
+  label{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted);font-weight:500}
+  input{font:inherit;color:var(--ink);padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-s);background:#FCFCFD;min-width:0;transition:border-color .15s,box-shadow .15s,background .15s}
+  input:hover{border-color:#D5DAE1}
+  input:focus{outline:none;border-color:var(--accent);background:#fff;box-shadow:0 0 0 4px rgba(37,99,235,.12)}
+  .btns{display:flex;gap:8px;flex-wrap:wrap}
+  button{font:inherit;font-weight:600;font-size:14px;border:1px solid transparent;border-radius:var(--radius-s);padding:10px 16px;cursor:pointer;transition:transform .12s,box-shadow .15s,background .15s,filter .15s}
+  button:hover:not(:disabled){filter:brightness(.97);transform:translateY(-1px)}
+  button:active:not(:disabled){transform:none}
+  button:focus-visible{outline:none;box-shadow:0 0 0 4px rgba(37,99,235,.18)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .b-pri{background:var(--ink);color:#fff}
+  .b-acc{background:var(--accent);color:#fff;box-shadow:0 4px 12px rgba(37,99,235,.22)}
+  .b-sec{background:#fff;border-color:var(--line);color:var(--ink)}
+  .b-sec:hover:not(:disabled){background:#F9FAFB}
+  .b-red{background:var(--red-bg);color:var(--red);border-color:#F8CFCF}
+  .b-grn{background:var(--green-bg);color:var(--green);border-color:#C7EBD3}
+  .b-sm{padding:6px 12px;font-size:13px}
+  .note{font-size:13px;color:var(--muted);margin:12px 0 0}
+  .err{color:var(--red);font-size:13px;margin-top:8px;min-height:1em}
+
+  /* ---------- Banner de estado ---------- */
+  .banner{display:flex;align-items:center;gap:18px;padding:16px 22px;border-radius:var(--radius);border:1px solid var(--line);background:var(--panel);box-shadow:var(--shadow);transition:background .3s,border-color .3s}
+  .banner .tag{font-family:var(--mono);font-weight:700;font-size:15px;letter-spacing:.08em;padding:6px 14px;border-radius:999px;background:var(--line-2);color:var(--muted)}
+  .banner .why{color:var(--muted)}
+  .banner .btns{margin-left:auto}
+  .banner.NORMAL{border-color:#CDEBD8;background:linear-gradient(90deg,var(--green-bg),#fff 60%)} .banner.NORMAL .tag{background:var(--green);color:#fff}
+  .banner.ALARMA{border-color:#F9DFAE;background:linear-gradient(90deg,var(--amber-bg),#fff 60%)} .banner.ALARMA .tag{background:var(--orange);color:#fff}
+  .banner.CORTE{border-color:#F6C7C7;background:linear-gradient(90deg,var(--red-bg),#fff 60%)} .banner.CORTE .tag{background:var(--red);color:#fff}
+  .banner.ALARMA .tag,.banner.CORTE .tag{animation:pulse 1.1s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.55}}
+
+  /* ---------- Indicadores ---------- */
+  .kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:18px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px 22px;box-shadow:var(--shadow);transition:box-shadow .2s,transform .2s}
+  .kpi:hover{box-shadow:var(--shadow-h);transform:translateY(-2px)}
+  .kpi .top{display:flex;align-items:center;gap:10px}
+  .kpi .ico{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:var(--cb);color:var(--c)}
+  .kpi .ico svg{width:18px;height:18px}
+  .kpi .lbl{font-size:13px;color:var(--muted);font-weight:600}
+  .kpi .val{font-family:var(--mono);font-size:clamp(28px,3vw,38px);font-weight:700;line-height:1.15;margin-top:14px;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .kpi .val small{font-family:'Inter',system-ui,sans-serif;font-size:16px;color:var(--soft);margin-left:5px;font-weight:600;letter-spacing:0}
+  .kpi .ext{font-size:12.5px;color:var(--muted);margin-top:6px;padding-top:10px;border-top:1px dashed var(--line)}
+
+  /* ---------- Gráficas y lateral ---------- */
+  .grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items:start}
+  .charts{display:grid;gap:22px}
+  .chart-head{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+  .chart-head h2{margin:0}
+  .chart-head .tools{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+  .seg{display:inline-flex;padding:3px;border-radius:var(--radius-s);background:var(--line-2);border:1px solid var(--line)}
+  .seg button{border-radius:8px;padding:5px 12px;background:transparent;color:var(--muted);font-size:13px;border:none}
+  .seg button:hover{transform:none}
+  .seg button.act{background:#fff;color:var(--ink);box-shadow:0 1px 3px rgba(16,24,40,.1)}
+  .chart-box{position:relative;height:210px}
+  .charts-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;border-radius:var(--radius);background:var(--panel);border:1px solid var(--line);box-shadow:var(--shadow)}
+  .charts-bar .t{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  .charts-bar .tools{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+  .chart-quad{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px}
+  .chart-quad .card{padding:18px 18px 14px}
+  .chart-head .sub{font-size:12px;color:var(--soft);font-weight:500}
+  .side{display:grid;gap:22px}
+  .lims{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .lims .full{grid-column:1/-1}
+  .cur{font-size:12px;color:var(--soft);font-weight:400}
+  .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+  /* ---------- Registro ---------- */
+  .log{list-style:none;margin:0;padding:0;max-height:320px;overflow:auto;display:flex;flex-direction:column;gap:8px}
+  .log li{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:13px;padding:10px 12px;border-radius:var(--radius-s);background:#FCFCFD;border:1px solid var(--line-2)}
+  .log .t{font-family:var(--mono);color:var(--soft);font-size:12px;align-self:center}
+  .log .m{grid-column:1/-1;color:var(--ink)}
+  .badge{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;text-transform:uppercase;letter-spacing:.05em;justify-self:start}
+  .badge.corte,.badge.error{background:var(--red-bg);color:var(--red)}
+  .badge.alarma{background:var(--amber-bg);color:var(--orange-d)}
+  .badge.normal,.badge.rearme{background:var(--green-bg);color:var(--green)}
+  .badge.info,.badge.config,.badge.carga,.badge.conexion{background:var(--accent-bg);color:var(--accent)}
+  .empty{color:var(--muted);font-size:13px}
+
+  /* ---------- Instrucciones ---------- */
+  .help{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  .step{border:1px solid var(--line-2);background:#FCFCFD;border-radius:var(--radius-s);padding:18px}
+  .step .n{width:28px;height:28px;border-radius:9px;display:grid;place-items:center;background:var(--accent-bg);color:var(--accent);font-weight:700;font-size:14px;margin-bottom:10px}
+  .help h3{font-size:15px;margin:0 0 8px}
+  .help ol,.help ul{margin:0;padding-left:20px;font-size:14px;color:#374151}
+  .help li{margin-bottom:6px}
+  code{font-family:var(--mono);font-size:12.5px;background:var(--line-2);border:1px solid var(--line);padding:1px 6px;border-radius:6px}
+
+  .toast{position:fixed;right:20px;bottom:20px;background:var(--ink);color:#fff;padding:12px 18px;border-radius:12px;font-size:14px;opacity:0;transform:translateY(10px);transition:all .25s;pointer-events:none;max-width:360px;box-shadow:0 10px 30px rgba(16,24,40,.2)}
+  .toast.show{opacity:1;transform:none}
+  footer{text-align:center;color:var(--soft);font-size:12px;padding:0 0 28px}
+
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+  @media (max-width:1250px){.kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  @media (max-width:1100px){.grid{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.help{grid-template-columns:1fr}}
+  @media (max-width:760px){.chart-quad{grid-template-columns:1fr}}
+  @media (max-width:640px){
+    .hwrap{padding:12px 16px}.chips{margin-left:0}
+    main{padding:16px;gap:16px}.card{padding:16px}
+    .conn{grid-template-columns:1fr}
+    .kpis{gap:10px}.kpi{padding:14px}.kpi .val small{font-size:13px}
+    .banner{flex-wrap:wrap}.banner .btns{margin-left:0}
+    .lims{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hwrap">
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z"/></svg>
+    </div>
+    <div>
+      <h1>Medidor DC con protecciones</h1>
+      <div class="sub">ESP32 + INA219 · Monitoreo en tiempo real por MQTT</div>
+    </div>
+    <div class="chips">
+      <span class="chip"><span class="dot" id="dBroker"></span><span id="tBroker">Broker: desconectado</span></span>
+      <span class="chip"><span class="dot" id="dEquipo"></span><span id="tEquipo">Equipo: sin datos</span></span>
+      <span class="chip" id="cRssi" title="Intensidad de la señal WiFi del ESP32">WiFi: —</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- CONEXIÓN -->
+  <details class="card" id="panelConn" open>
+    <summary>Conexión <span class="hint" id="connHint">— configure el broker y el ID del equipo</span></summary>
+    <div class="conn">
+      <label>Broker MQTT (WebSocket seguro)
+        <input id="inUrl" value="wss://broker.hivemq.com:8884/mqtt" spellcheck="false">
+      </label>
+      <label>ID del equipo (igual que DEVICE_ID en el ESP32)
+        <input id="inId" placeholder="ID de tu equipo" spellcheck="false">
+      </label>
+      <div class="btns">
+        <button class="b-pri" id="btnConn">Conectar</button>
+        <button class="b-sec" id="btnDemo" title="Simula datos sin el hardware">Modo demo</button>
+      </div>
+    </div>
+    <p class="err" id="connErr"></p>
+    <p class="note">Tópico base: <code id="lblBase">medidordc/medidor-01</code> · El broker público de HiveMQ no necesita cuenta; use un ID único para que nadie más publique en su tópico.</p>
+  </details>
+
+  <!-- ESTADO -->
+  <section class="banner" id="banner">
+    <span class="tag" id="estTag">— — —</span>
+    <span class="why" id="estWhy">Esperando datos del medidor…</span>
+    <div class="btns">
+      <button class="b-grn" id="btnRearmar" disabled>Rearmar</button>
+      <button class="b-sec" id="btnSilenciar" disabled>Silenciar</button>
+    </div>
+  </section>
+
+  <!-- VALORES -->
+  <section class="kpis">
+    <div class="kpi" style="--c:var(--teal);--cb:var(--teal-bg)">
+      <div class="top">
+        <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8z"/></svg></span>
+        <span class="lbl">Voltaje de carga</span>
+      </div>
+      <div class="val"><span id="kCarga">—</span><small>V</small></div>
+      <div class="ext" id="kVx">IN− respecto a GND · Límites: —</div>
+    </div>
+    <div class="kpi" style="--c:var(--accent);--cb:var(--accent-bg)">
+      <div class="top">
+        <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6M12 16v6M5 8h14v8H5z"/></svg></span>
+        <span class="lbl">Voltaje de bus</span>
+      </div>
+      <div class="val"><span id="kV">—</span><small>V</small></div>
+      <div class="ext" id="kVbx">IN+ respecto a GND</div>
+    </div>
+    <div class="kpi" style="--c:var(--orange-d);--cb:var(--amber-bg)">
+      <div class="top">
+        <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></span>
+        <span class="lbl">Corriente</span>
+      </div>
+      <div class="val"><span id="kI">—</span><small>A</small></div>
+      <div class="ext" id="kIx">Máx. registrada: —</div>
+    </div>
+    <div class="kpi" style="--c:var(--violet);--cb:var(--violet-bg)">
+      <div class="top">
+        <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></span>
+        <span class="lbl">Potencia</span>
+      </div>
+      <div class="val"><span id="kP">—</span><small>W</small></div>
+      <div class="ext" id="kPx">Promedio (ventana): —</div>
+    </div>
+    <div class="kpi" style="--c:var(--green);--cb:var(--green-bg)">
+      <div class="top">
+        <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 11v2M7 10v4M11 10v4"/></svg></span>
+        <span class="lbl">Energía</span>
+      </div>
+      <div class="val"><span id="kE">—</span><small>Wh</small></div>
+      <div class="ext" id="kEx">Carga: —</div>
+    </div>
+  </section>
+
+  <div class="grid">
+    <!-- GRÁFICAS -->
+    <section class="charts">
+      <div class="charts-bar">
+        <span class="t">Gráficas</span>
+        <div class="tools">
+          <div class="seg" id="segWin">
+            <button data-w="60">1 min</button>
+            <button data-w="300" class="act">5 min</button>
+            <button data-w="900">15 min</button>
+          </div>
+          <button class="b-sec b-sm" id="btnPausa">Pausar</button>
+          <button class="b-sec b-sm" id="limpiar">Limpiar</button>
+        </div>
+      </div>
+      <div class="chart-quad">
+        <div class="card">
+          <div class="chart-head"><h2>Corriente de carga</h2></div>
+          <div class="chart-box"><canvas id="chI" aria-label="Gráfica de corriente de carga en el tiempo"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="chart-head"><h2>Voltaje de carga</h2><span class="sub">IN− · GND</span></div>
+          <div class="chart-box"><canvas id="chCarga" aria-label="Gráfica de voltaje de carga en el tiempo"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="chart-head"><h2>Voltaje de bus</h2><span class="sub">IN+ · GND</span></div>
+          <div class="chart-box"><canvas id="chV" aria-label="Gráfica de voltaje de bus en el tiempo"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="chart-head"><h2>Potencia de carga</h2></div>
+          <div class="chart-box"><canvas id="chP" aria-label="Gráfica de potencia de carga en el tiempo"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LATERAL -->
+    <aside class="side">
+      <div class="card">
+        <h2>Límites de protección</h2>
+        <form class="lims" id="formLim" novalidate>
+          <label>Alarma corriente (A) <span class="cur" id="cIa">actual: —</span>
+            <input type="number" step="0.01" min="0.01" max="3.2" id="inIa" required>
+          </label>
+          <label>Corte corriente (A) <span class="cur" id="cIc">actual: —</span>
+            <input type="number" step="0.01" min="0.01" max="3.2" id="inIc" required>
+          </label>
+          <label>Voltaje mínimo (V) <span class="cur" id="cVmin">actual: —</span>
+            <input type="number" step="0.1" min="0" max="26" id="inVmin" required>
+          </label>
+          <label>Voltaje máximo (V) <span class="cur" id="cVmax">actual: —</span>
+            <input type="number" step="0.1" min="0" max="26" id="inVmax" required>
+          </label>
+          <div class="full">
+            <button class="b-acc" type="submit" style="width:100%">Enviar al medidor</button>
+            <p class="err" id="limErr"></p>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Acciones</h2>
+        <div class="actions">
+          <button class="b-grn" id="btnCargaOn">Conectar carga</button>
+          <button class="b-red" id="btnCargaOff">Desconectar carga</button>
+          <button class="b-sec" id="btnResetE" style="grid-column:1/-1">Reiniciar energía y máximo</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Registro de eventos</h2>
+        <ul class="log" id="log"><li class="empty" style="display:block;border:none;background:none">Sin eventos todavía.</li></ul>
+      </div>
+    </aside>
+  </div>
+
+  <!-- INSTRUCCIONES -->
+  <section class="card">
+    <h2>Cómo usar esta página</h2>
+    <div class="help">
+      <div class="step">
+        <div class="n">1</div>
+        <h3>Prepare el ESP32</h3>
+        <ol>
+          <li>Copie <code>include/secrets.example.h</code> como <code>include/secrets.h</code> y configure su red WiFi de 2,4 GHz en <code>WIFI_SSID</code> y <code>WIFI_PASS</code>.</li>
+          <li>Cambie <code>DEVICE_ID</code> por un nombre único, por ejemplo <code>medidor-sofia-01</code>.</li>
+          <li>En PlatformIO elija <code>env:principal</code> y suba el programa.</li>
+        </ol>
+      </div>
+      <div class="step">
+        <div class="n">2</div>
+        <h3>Conecte la página</h3>
+        <ol>
+          <li>Escriba el mismo ID del equipo arriba y pulse <b>Conectar</b>.</li>
+          <li>El indicador <b>Equipo</b> pasa a verde cuando llegan datos (1 por segundo).</li>
+          <li>Sin hardware, pulse <b>Modo demo</b> para ver la página funcionando con datos simulados.</li>
+        </ol>
+      </div>
+      <div class="step">
+        <div class="n">3</div>
+        <h3>Alarmas y límites</h3>
+        <ul>
+          <li><b>ALARMA</b>: corriente sobre el límite de alarma o voltaje de carga bajo. Suena el buzzer; la carga sigue.</li>
+          <li><b>CORTE</b>: corriente o voltaje de carga sobre el límite de corte. La carga se desconecta hasta <b>Rearmar</b> (aquí o con el botón físico).</li>
+          <li>Los límites enviados quedan guardados en el ESP32 aunque se apague.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>Medidor DC · ESP32 + INA219</footer>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- Utilidades ----------
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n, d) => (n == null || isNaN(n)) ? '—'
+    : Number(n).toLocaleString('es-CO', { minimumFractionDigits: d, maximumFractionDigits: d });
+  function medida(valor, unidad) {
+    if (!Number.isFinite(valor)) return '—';
+    const mili = unidad !== 'V' && Math.abs(valor) < 1;
+    return fmt(mili ? valor * 1000 : valor, unidad === 'V' ? 3 : 2) + ' ' + (mili ? 'm' : '') + unidad;
+  }
+  const hora = (d = new Date()) => d.toLocaleTimeString('es-CO', { hour12: false });
+  const store = {
+    get(k, def) { try { return localStorage.getItem(k) ?? def; } catch { return def; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch { /* sin almacenamiento */ } }
+  };
+  let toastT;
+  function toast(msg) {
+    const t = $('toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 3000);
+  }
+  // Voltaje que se muestra: el de la carga (IN-). Si el firmware no envía vCarga, se usa v.
+  const vCargaDe = (d) => +(d.vCarga ?? d.v);
+  // Voltaje de bus (IN+). Solo existe si el firmware envía también vCarga.
+  const vBusDe = (d) => d.vCarga == null ? NaN : +d.v;
+
+  // ---------- Estado de la página ----------
+  const MAX_PUNTOS = 900;                 // 15 min a 1 dato por segundo
+  const serie = { t: [], carga: [], v: [], i: [], p: [] };
+  let ventana = 300, pausado = false;
+  let client = null, demo = null, base = '';
+  let ultimoDato = 0, config = null;
+
+  $('inUrl').value = store.get('md_url', $('inUrl').value);
+  $('inId').value = store.get('md_id', $('inId').value);
+  const actualizarBase = () => { base = 'medidordc/' + $('inId').value.trim(); $('lblBase').textContent = base; };
+  actualizarBase();
+  $('inId').addEventListener('input', actualizarBase);
+
+  // ---------- Gráficas (tema claro) ----------
+  if (typeof Chart === 'undefined') {
+    $('connErr').textContent = 'No se pudieron cargar las librerías. Revise su conexión a internet y recargue la página.';
+  } else {
+    Chart.defaults.font.family = "'Inter', system-ui, sans-serif";
+    Chart.defaults.color = '#6B7280';
+  }
+  const lineaLimite = (label, color) => ({
+    label, data: [], borderColor: color, borderWidth: 1.5, borderDash: [6, 5],
+    pointRadius: 0, fill: false, tension: 0
+  });
+  function degradado(ctx, color) {
+    const { chart } = ctx; const { ctx: c, chartArea } = chart;
+    if (!chartArea) return color + '22';
+    const g = c.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+    g.addColorStop(0, color + '33'); g.addColorStop(1, color + '00');
+    return g;
+  }
+  function crearGrafica(id, label, color, unidad, limites) {
+    return new Chart($(id), {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          { label, data: [], borderColor: color, backgroundColor: (ctx) => degradado(ctx, color),
+            borderWidth: 2.2, pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color,
+            fill: true, tension: 0.3 },
+          ...limites.map(([l, c]) => lineaLimite(l, c))
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: limites.length > 0, position: 'top', align: 'end',
+            labels: { boxWidth: 14, boxHeight: 2, font: { size: 12 }, color: '#6B7280' } },
+          tooltip: { backgroundColor: '#111827', padding: 10, cornerRadius: 8, displayColors: false,
+            callbacks: { label: (c) => c.dataset.label + ': ' + medida(c.parsed.y, unidad) } }
+        },
+        scales: {
+          x: { ticks: { maxTicksLimit: 6, color: '#9CA3AF', font: { size: 11 } }, grid: { display: false }, border: { display: false } },
+          y: { beginAtZero: unidad !== 'V', ticks: { color: '#9CA3AF', font: { size: 11 }, maxTicksLimit: 5,
+                 callback: (v) => medida(v, unidad) }, grid: { color: '#F1F3F6' }, border: { display: false } }
+        }
+      }
+    });
+  }
+  const chI = crearGrafica('chI', 'Corriente', '#F59E0B', 'A',
+    [['Alarma', '#B45309'], ['Corte', '#DC2626']]);
+  const chCarga = crearGrafica('chCarga', 'Voltaje de carga', '#0EA5A4', 'V',
+    [['V mín', '#B45309'], ['V máx', '#DC2626']]);
+  const chV = crearGrafica('chV', 'Voltaje de bus', '#2563EB', 'V', []);
+  const chP = crearGrafica('chP', 'Potencia', '#7C3AED', 'W', []);
+
+  function redibujar(forzar = false) {
+    if (pausado && !forzar) return;
+    const n = Math.min(ventana, serie.t.length);
+    const desde = serie.t.length - n;
+    const labels = serie.t.slice(desde);
+    const llenar = (val) => labels.map(() => val);
+    chI.data.labels = labels; chI.data.datasets[0].data = serie.i.slice(desde);
+    chCarga.data.labels = labels; chCarga.data.datasets[0].data = serie.carga.slice(desde);
+    chV.data.labels = labels; chV.data.datasets[0].data = serie.v.slice(desde);
+    chP.data.labels = labels; chP.data.datasets[0].data = serie.p.slice(desde);
+    if (config) {
+      chI.data.datasets[1].data = llenar(config.iAlarma); chI.data.datasets[2].data = llenar(config.iCorte);
+      chCarga.data.datasets[1].data = llenar(config.vMin); chCarga.data.datasets[2].data = llenar(config.vMax);
+    }
+    chI.update('none'); chCarga.update('none'); chV.update('none'); chP.update('none');
+    const ps = serie.p.slice(desde);
+    $('kPx').textContent = 'Promedio (ventana): ' + (ps.length ? medida(ps.reduce((a, b) => a + b, 0) / ps.length, 'W') : '—');
+  }
+
+  $('limpiar').onclick = () => { Object.values(serie).forEach(a => a.length = 0); redibujar(true); };
+  $('segWin').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    ventana = +b.dataset.w;
+    [...$('segWin').children].forEach((x) => x.classList.toggle('act', x === b));
+    redibujar();
+  });
+  $('btnPausa').addEventListener('click', () => {
+    pausado = !pausado;
+    $('btnPausa').textContent = pausado ? 'Reanudar' : 'Pausar';
+    if (!pausado) redibujar();
+  });
+
+  // ---------- Pintar datos ----------
+  function setDot(id, cls, txt, tid) { $(id).className = 'dot ' + cls; $(tid).textContent = txt; }
+
+  function onDatos(d) {
+    ultimoDato = Date.now();
+    const vc = vCargaDe(d), vb = vBusDe(d), i = +d.i, p = +d.p;
+    serie.t.push(hora()); serie.carga.push(vc); serie.v.push(Number.isFinite(vb) ? vb : null); serie.i.push(i); serie.p.push(p);
+    if (serie.t.length > MAX_PUNTOS) Object.values(serie).forEach((a) => a.shift());
+
+    $('kCarga').textContent = fmt(vc, 3);
+    $('kV').textContent = fmt(Number.isFinite(vb) ? vb : null, 3);
+    for (const [id, value, unit] of [['kI', i, 'A'], ['kP', p, 'W']]) {
+      const [numero, unidad] = medida(value, unit).split(' ');
+      $(id).textContent = numero; $(id).nextElementSibling.textContent = unidad || '';
+    }
+    if (!matchMedia('(prefers-reduced-motion: reduce)').matches)
+      document.querySelectorAll('.val').forEach(el => el.animate([{ opacity: .6 }, { opacity: 1 }], { duration: 250 }));
+    $('kE').textContent = fmt(+d.e, 3);
+    $('kIx').textContent = 'Máx. registrada: ' + medida(+d.imax, 'A');
+    $('kEx').textContent = 'Carga: ' + (d.carga ? 'habilitada' : 'deshabilitada');
+    $('cRssi').textContent = d.rssi != null ? `WiFi: ${d.rssi} dBm` : 'WiFi: —';
+    setDot('dEquipo', 'on', 'Equipo: en línea', 'tEquipo');
+
+    const est = d.estado || 'NORMAL';
+    $('banner').className = 'banner ' + est;
+    $('estTag').textContent = est;
+    $('estWhy').textContent = d.sensor === false ? 'Sensor INA219 no detectado: revise el cableado.'
+      : est === 'NORMAL' ? 'Todos los valores dentro de los límites.'
+      : est === 'ALARMA' ? `Alarma: ${d.motivo}. La carga sigue conectada.`
+      : `Corte por ${String(d.motivo || '').toLowerCase()}. Carga desconectada hasta rearmar.`;
+    $('btnRearmar').disabled = est !== 'CORTE';
+    $('btnSilenciar').disabled = est === 'NORMAL';
+    redibujar();
+  }
+
+  function onConfig(c) {
+    config = c;
+    const map = [['inIa', 'cIa', c.iAlarma, 2], ['inIc', 'cIc', c.iCorte, 2], ['inVmin', 'cVmin', c.vMin, 1], ['inVmax', 'cVmax', c.vMax, 1]];
+    for (const [inp, cur, val, d] of map) {
+      $(cur).textContent = 'actual: ' + fmt(val, d);
+      if (document.activeElement !== $(inp)) $(inp).value = val;
+    }
+    $('kVx').textContent = `IN− respecto a GND · Límites: ${fmt(c.vMin, 1)} – ${fmt(c.vMax, 1)} V`;
+    if (c.iMaxSensor) { $('inIa').max = c.iMaxSensor; $('inIc').max = c.iMaxSensor; }
+    redibujar();
+  }
+
+  function onEvento(ev) {
+    const ul = $('log');
+    const vacio = ul.querySelector('.empty'); if (vacio) vacio.remove();
+    const li = document.createElement('li');
+    const tipo = String(ev.tipo || 'info').toLowerCase();
+    li.innerHTML = `<span class="badge ${tipo}"></span><span class="t"></span><span class="m"></span>`;
+    li.children[0].textContent = tipo;
+    li.children[1].textContent = hora();
+    const extra = ev.i != null ? ` (I = ${medida(+ev.i, 'A')}, V bus = ${medida(vBusDe(ev), 'V')}, V carga = ${medida(vCargaDe(ev), 'V')})` : '';
+    li.children[2].textContent = (ev.msg || '') + extra;
+    ul.prepend(li);
+    while (ul.children.length > 60) ul.lastChild.remove();
+    if (tipo === 'corte' || tipo === 'alarma' || tipo === 'error') toast(`${tipo.toUpperCase()}: ${ev.msg}`);
+  }
+
+  function onMensaje(sub, texto) {
+    if (sub === 'estado') {
+      const on = texto === 'online';
+      setDot('dEquipo', on ? 'on' : 'off', on ? 'Equipo: en línea' : 'Equipo: desconectado', 'tEquipo');
+      if (!on) onEvento({ tipo: 'conexion', msg: 'El medidor se desconectó del broker' });
+      return;
+    }
+    let j; try { j = JSON.parse(texto); } catch { return; }
+    if (sub === 'datos') onDatos(j);
+    else if (sub === 'config') onConfig(j);
+    else if (sub === 'evento') onEvento(j);
+  }
+
+  // Si dejan de llegar datos
+  setInterval(() => {
+    if ((client || demo) && ultimoDato && Date.now() - ultimoDato > 5000) {
+      setDot('dEquipo', 'wait', 'Equipo: sin datos', 'tEquipo');
+    }
+  }, 1000);
+
+  // ---------- MQTT ----------
+  function enviar(cmd) {
+    if (demo) return demo.comando(cmd);
+    if (!client || !client.connected) { toast('No hay conexión con el broker.'); return false; }
+    client.publish(base + '/cmd', JSON.stringify(cmd), { qos: 1 });
+    toast('Comando enviado: ' + cmd.accion);
+    return true;
+  }
+
+  function desconectar() {
+    if (client) { client.end(true); client = null; }
+    if (demo) { demo.parar(); demo = null; }
+    setDot('dBroker', 'off', 'Broker: desconectado', 'tBroker');
+    setDot('dEquipo', '', 'Equipo: sin datos', 'tEquipo');
+    $('btnConn').textContent = 'Conectar';
+    $('btnDemo').disabled = false;
+    $('connHint').textContent = '— configure el broker y el ID del equipo';
+  }
+
+  function conectar() {
+    $('connErr').textContent = '';
+    const url = $('inUrl').value.trim(), id = $('inId').value.trim();
+    if (!/^wss?:\/\//.test(url)) { $('connErr').textContent = 'La dirección debe empezar por wss:// o ws://'; return; }
+    if (!/^[A-Za-z0-9_\-]{3,40}$/.test(id)) { $('connErr').textContent = 'El ID debe tener de 3 a 40 letras, números, - o _'; return; }
+    if (typeof mqtt === 'undefined') { $('connErr').textContent = 'No se cargó la librería MQTT. Revise su internet y recargue.'; return; }
+    store.set('md_url', url); store.set('md_id', id); actualizarBase();
+
+    setDot('dBroker', 'wait', 'Broker: conectando…', 'tBroker');
+    client = mqtt.connect(url, {
+      clientId: 'web-' + Math.random().toString(16).slice(2, 10),
+      clean: true, reconnectPeriod: 3000, connectTimeout: 10000
+    });
+    client.on('connect', () => {
+      setDot('dBroker', 'on', 'Broker: conectado', 'tBroker');
+      $('btnConn').textContent = 'Desconectar'; $('btnDemo').disabled = true;
+      $('connHint').textContent = '— conectado a ' + base;
+      client.subscribe(base + '/#', { qos: 1 });
+      onEvento({ tipo: 'conexion', msg: 'Página conectada al broker' });
+      $('panelConn').open = false;
+    });
+    client.on('reconnect', () => setDot('dBroker', 'wait', 'Broker: reconectando…', 'tBroker'));
+    client.on('offline', () => setDot('dBroker', 'off', 'Broker: sin conexión', 'tBroker'));
+    client.on('error', (e) => { $('connErr').textContent = 'Error MQTT: ' + e.message; });
+    client.on('message', (topic, payload) => {
+      if (topic.startsWith(base + '/')) onMensaje(topic.slice(base.length + 1), payload.toString());
+    });
+  }
+
+  $('btnConn').addEventListener('click', () => (client || demo) ? desconectar() : conectar());
+
+  // ---------- Botones de control ----------
+  $('btnRearmar').addEventListener('click', () => enviar({ accion: 'rearmar' }));
+  $('btnSilenciar').addEventListener('click', () => enviar({ accion: 'silenciar' }));
+  $('btnCargaOn').addEventListener('click', () => enviar({ accion: 'carga', on: true }));
+  $('btnCargaOff').addEventListener('click', () => enviar({ accion: 'carga', on: false }));
+  $('btnResetE').addEventListener('click', () => enviar({ accion: 'reset_energia' }));
+
+  const limitesInputs = ['inIa', 'inIc', 'inVmin', 'inVmax'];
+  limitesInputs.forEach((id) => $(id).addEventListener('input', () => { $('limErr').textContent = ''; }));
+  $('formLim').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const [ia, ic, vmin, vmax] = limitesInputs.map((id) => parseFloat($(id).value.replace(',', '.')));
+    let err = '';
+    if ([ia, ic, vmin, vmax].some(isNaN)) err = 'Complete los cuatro valores.';
+    else if (!(ia > 0 && ia < ic)) err = 'La alarma de corriente debe ser mayor que 0 y menor que el corte.';
+    else if (ic > (config && config.iMaxSensor ? config.iMaxSensor : 3.2)) err = `El corte no puede superar ${fmt(config && config.iMaxSensor ? config.iMaxSensor : 3.2, 2)} A (rango del sensor).`;
+    else if (!(vmin >= 0 && vmin < vmax)) err = 'El voltaje mínimo debe ser menor que el máximo.';
+    else if (vmax > 26) err = 'El voltaje máximo no puede superar 26 V (límite del INA219).';
+    if (err) { $('limErr').textContent = err; return; }
+    enviar({ accion: 'limites', iAlarma: ia, iCorte: ic, vMin: vmin, vMax: vmax });
+  });
+
+  // ---------- Modo demo (simula el ESP32) ----------
+  function crearDemo() {
+    const s = { estado: 'NORMAL', motivo: '', carga: true, e: 0, imax: 0, silenciado: false,
+      lim: { iAlarma: 2.5, iCorte: 3.0, vMin: 10, vMax: 14 }, iObj: 0.8, iAct: 0.8, t: 0 };
+    const pubConfig = () => onConfig({ ...s.lim, carga: s.carga });
+    const evento = (tipo, msg, i, v) => onEvento({ tipo, msg, i, vCarga: v, v: v + i * 0.1 });
+    pubConfig();
+    const timer = setInterval(() => {
+      s.t++;
+      if (s.t % 12 === 0) s.iObj = [0.1, 0.26, 0.55, 1.0, 1.8, 2.6, 0.8][Math.floor(Math.random() * 7)];
+      if (s.t % 45 === 0) s.iObj = 3.1;     // provoca un corte de vez en cuando
+      s.iAct += (s.iObj - s.iAct) * 0.35;
+      const conectada = s.carga && s.estado !== 'CORTE';
+      const i = conectada ? Math.max(0, s.iAct + (Math.random() - 0.5) * 0.03) : 0;
+      const v = 12.1 - 0.12 * i + (Math.random() - 0.5) * 0.04;   // voltaje de carga
+      const p = v * i;
+      s.e += p / 3600; if (i > s.imax) s.imax = i;
+      if (s.estado !== 'CORTE') {
+        if (i >= s.lim.iCorte) { s.estado = 'CORTE'; s.motivo = 'Sobrecorriente'; evento('corte', 'Sobrecorriente', i, v); s.iObj = 0.8; }
+        else if (v >= s.lim.vMax) { s.estado = 'CORTE'; s.motivo = 'Sobrevoltaje'; evento('corte', 'Sobrevoltaje', i, v); }
+        else if (s.estado === 'NORMAL' && (i >= s.lim.iAlarma || (v > 1 && v < s.lim.vMin))) {
+          s.estado = 'ALARMA'; s.motivo = i >= s.lim.iAlarma ? 'Corriente alta' : 'Voltaje bajo'; evento('alarma', s.motivo, i, v);
+        } else if (s.estado === 'ALARMA' && i < s.lim.iAlarma * 0.95 && (v <= 1 || v > s.lim.vMin * 1.02)) {
+          s.estado = 'NORMAL'; s.motivo = ''; evento('normal', 'Valores normales', i, v);
+        }
+      }
+      onDatos({ v: v + i * 0.1, vCarga: v, i, p, e: s.e, imax: s.imax, estado: s.estado, motivo: s.motivo, carga: s.carga,
+        sensor: true, rssi: -55 - Math.round(Math.random() * 8) });
+    }, 1000);
+    return {
+      parar: () => clearInterval(timer),
+      comando(c) {
+        if (c.accion === 'rearmar' && s.estado === 'CORTE') { s.estado = 'NORMAL'; s.motivo = ''; evento('rearme', 'Sistema rearmado'); }
+        else if (c.accion === 'silenciar') { s.silenciado = true; toast('Buzzer silenciado (demo)'); }
+        else if (c.accion === 'carga') { s.carga = !!c.on; evento('carga', s.carga ? 'Carga habilitada' : 'Carga deshabilitada'); pubConfig(); }
+        else if (c.accion === 'reset_energia') { s.e = 0; s.imax = 0; evento('info', 'Energía y corriente máxima reiniciadas'); }
+        else if (c.accion === 'limites') { s.lim = { iAlarma: c.iAlarma, iCorte: c.iCorte, vMin: c.vMin, vMax: c.vMax }; evento('config', 'Límites actualizados desde la web'); pubConfig(); }
+        return true;
+      }
+    };
+  }
+
+  $('btnDemo').addEventListener('click', () => {
+    if (client) return;
+    demo = crearDemo();
+    setDot('dBroker', 'wait', 'Broker: modo demo', 'tBroker');
+    $('btnConn').textContent = 'Salir del demo';
+    $('btnDemo').disabled = true;
+    $('connHint').textContent = '— modo demo: datos simulados, sin hardware';
+    onEvento({ tipo: 'info', msg: 'Modo demo iniciado: los datos son simulados' });
+    $('panelConn').open = false;
+  });
+})();
+</script>
+</body>
+</html>
