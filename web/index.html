@@ -189,7 +189,7 @@
       <label>Broker MQTT (WebSocket seguro)
         <input id="inUrl" value="wss://broker.hivemq.com:8884/mqtt" spellcheck="false">
       </label>
-      <label>ID del equipo (igual que DEVICE_ID en el ESP32)
+      <label>ID del equipo (igual que el ID configurado por UART)
         <input id="inId" placeholder="ID de tu equipo" spellcheck="false">
       </label>
       <div class="btns">
@@ -198,7 +198,7 @@
       </div>
     </div>
     <p class="err" id="connErr"></p>
-    <p class="note">Tópico base: <code id="lblBase">medidordc/medidor-01</code> · El broker público de HiveMQ no necesita cuenta; use un ID único para que nadie más publique en su tópico.</p>
+    <p class="note">Tópico base: <code id="lblBase">medidordc/medidor-01</code> · El broker público de HiveMQ usa este ID para identificar los tópicos del equipo.</p>
   </details>
 
   <!-- ESTADO -->
@@ -338,8 +338,8 @@
         <div class="n">1</div>
         <h3>Prepare el ESP32</h3>
         <ol>
-          <li>Copie <code>include/secrets.example.h</code> como <code>include/secrets.h</code> y configure su red WiFi de 2,4 GHz en <code>WIFI_SSID</code> y <code>WIFI_PASS</code>.</li>
-          <li>Cambie <code>DEVICE_ID</code> por un nombre único, por ejemplo <code>medidor-sofia-01</code>.</li>
+          <li>Configure por UART el nombre y la clave de su red Wi-Fi de 2,4 GHz.</li>
+          <li>Configure por UART un ID único, por ejemplo <code>medidor-sofia-01</code>, y escríbalo aquí.</li>
           <li>En PlatformIO elija <code>env:principal</code> y suba el programa.</li>
         </ol>
       </div>

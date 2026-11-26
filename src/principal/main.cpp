@@ -19,7 +19,7 @@
 #include "INA219Simple.h"
 #include "Calibration.h"
 #include "hardware_config.h"
-#include "secrets.h"
+#include "config_red.h"
 #include "formato_si.h"
 
 // =============================================================
@@ -91,6 +91,13 @@ QueueHandle_t colaEventos;    // loop()   -> tareaRed
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
 String tDatos, tEstado, tEvento, tConfig, tCmd;
+QueueHandle_t colaConfigRed;
+
+// Configuracion UART, de uso exclusivo de setup() y loop().
+ConfigRed configRed;
+bool imprimirPeriodicamente = true;
+
+void imprimir(const char *etiqueta);
 
 // =============================================================
 //  3) UTILIDADES
@@ -222,7 +229,7 @@ void evaluarProtecciones() {
 // =============================================================
 //  6) COMANDOS (web y monitor serie) – se ejecutan en loop()
 // =============================================================
-void ejecutarComando(const Comando &c) {
+bool ejecutarComando(const Comando &c) {
   switch (c.tipo) {
     case CMD_LIMITES: {
       Limites n = lim;
@@ -230,7 +237,8 @@ void ejecutarComando(const Comando &c) {
       if (!isnan(c.iCorte))  n.iCorte  = c.iCorte;
       if (!isnan(c.vMin))    n.vMin    = c.vMin;
       if (!isnan(c.vMax))    n.vMax    = c.vMax;
-      if (limitesValidos(n)) {
+      bool valido = limitesValidos(n);
+      if (valido) {
         lim = n;
         guardarLimites();
         publicarEvento("config", "Límites actualizados");
@@ -241,7 +249,7 @@ void ejecutarComando(const Comando &c) {
         publicarEvento("error", m);
       }
       configCambiada = true;
-      break;
+      return valido;
     }
     case CMD_REARMAR:
       if (estado == CORTE) rearmar();
@@ -262,50 +270,152 @@ void ejecutarComando(const Comando &c) {
       publicarEvento("info", "Energía y corriente máxima reiniciadas");
       break;
   }
+  return true;
 }
 
-void hacerCero() {
-  if (!calibrador.sensorOk()) return;
+bool hacerCero() {
+  if (!calibrador.sensorOk()) return false;
   Serial.println("Haciendo cero: carga desconectada temporalmente...");
   digitalWrite(PIN_CORTE, LOW);
   delay(300);                       // deja caer la corriente de la carga
   bool ok = calibrador.hacerCero(ina);
   aplicarCarga();
   publicarEvento(ok ? "info" : "error", ok ? "Cero del sensor guardado" : "Cero rechazado (pasa corriente)");
+  return ok;
 }
 
-// Lector de líneas del monitor serie que NUNCA bloquea
+void aplicarConfigSerie(const ConfigRed &nueva) {
+  if (!guardarConfigRed(nueva)) {
+    Serial.println("[CLI] ERROR al guardar en NVS");
+    return;
+  }
+  configRed = nueva;
+  if (colaConfigRed) xQueueOverwrite(colaConfigRed, &configRed);
+  Serial.println("[CLI] OK guardado en NVS");
+}
+
+bool ejecutarConfigSerie(const char *linea) {
+  if (strcmp(linea, "config ver") == 0) {
+    Serial.printf("[CLI] OK SSID=%s | ID=%s | clave=%s\n",
+                  configRed.ssid[0] ? configRed.ssid : "(sin configurar)",
+                  configRed.id[0] ? configRed.id : "(sin configurar)",
+                  configRed.clave[0] ? "(guardada)" : "(vacia)");
+  } else if (strncmp(linea, "config wifi ", 12) == 0) {
+    JsonDocument doc;
+    if (deserializeJson(doc, linea + 12) || !doc.is<JsonArray>() || doc.size() != 2) {
+      Serial.println("[CLI] ERROR uso: config wifi [\"SSID\",\"clave\"]");
+      return true;
+    }
+    JsonString ssid = doc[0].as<JsonString>();
+    JsonString clave = doc[1].as<JsonString>();
+    if (ssid.isNull() || clave.isNull() || strlen(ssid.c_str()) != ssid.size() ||
+        strlen(clave.c_str()) != clave.size() || !wifiValida(ssid.c_str(), clave.c_str())) {
+      Serial.println("[CLI] ERROR SSID de 1-32 bytes, clave vacia, de 8-63 bytes o 64 hex");
+      return true;
+    }
+    ConfigRed nueva = configRed;
+    strlcpy(nueva.ssid, ssid.c_str(), sizeof(nueva.ssid));
+    strlcpy(nueva.clave, clave.c_str(), sizeof(nueva.clave));
+    aplicarConfigSerie(nueva);
+  } else if (strncmp(linea, "config id ", 10) == 0) {
+    const char *id = linea + 10;
+    if (!idValido(id)) {
+      Serial.println("[CLI] ERROR ID de 1-64 caracteres: letras, numeros, guion o guion bajo");
+      return true;
+    }
+    ConfigRed nueva = configRed;
+    strlcpy(nueva.id, id, sizeof(nueva.id));
+    aplicarConfigSerie(nueva);
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// Procesa un máximo de 128 bytes por vuelta para ceder tiempo a la medición.
 void revisarSerie() {
-  static char linea[64];
-  static uint8_t n = 0;
-  while (Serial.available()) {
+  static char linea[704];
+  static size_t n = 0;
+  static bool descartar = false;
+  for (unsigned int leidos = 0; leidos < 128 && Serial.available(); ++leidos) {
     char ch = Serial.read();
     if (ch != '\n' && ch != '\r') {
-      if (n < sizeof(linea) - 1) linea[n++] = ch;
+      if (descartar) continue;
+      if (ch == '\b' || ch == '\x7f') {
+        if (n > 0) --n;
+      } else if (n == sizeof(linea) - 1 || ch == '\0') {
+        descartar = true;
+      } else {
+        linea[n++] = ch;
+      }
+      continue;
+    }
+    if (descartar) {
+      descartar = false;
+      n = 0;
+      Serial.println("[CLI] ERROR linea invalida o demasiado larga");
       continue;
     }
     if (n == 0) continue;
     linea[n] = '\0';
     n = 0;
 
+    if (ejecutarConfigSerie(linea)) continue;
+    if (strcmp(linea, "ping") == 0) {
+      Serial.println("[CLI] OK Medidor DC");
+      continue;
+    }
+    if (strcmp(linea, "medir") == 0) {
+      imprimir("[MEDIDA]");
+      continue;
+    }
+    if (strcmp(linea, "datos on") == 0 || strcmp(linea, "datos off") == 0) {
+      imprimirPeriodicamente = strcmp(linea, "datos on") == 0;
+      Serial.println("[CLI] OK flujo actualizado");
+      continue;
+    }
+
     Comando c{CMD_LIMITES, NAN, NAN, NAN, NAN, false};
-    if (strncmp(linea, "lim", 3) == 0) {
-      if (sscanf(linea + 3, "%f %f %f %f", &c.iAlarma, &c.iCorte, &c.vMin, &c.vMax) == 4) ejecutarComando(c);
-      else Serial.println("Uso: lim <iAlarma> <iCorte> <vMin> <vMax>   ej: lim 0.6 0.75 10 14");
+    if (strcmp(linea, "lim") == 0 || strncmp(linea, "lim ", 4) == 0) {
+      char extra;
+      if (sscanf(linea + 3, "%f %f %f %f %c", &c.iAlarma, &c.iCorte, &c.vMin, &c.vMax, &extra) != 4 ||
+          !isfinite(c.iAlarma) || !isfinite(c.iCorte) || !isfinite(c.vMin) || !isfinite(c.vMax)) {
+        Serial.println("[CLI] ERROR uso: lim <iAlarma> <iCorte> <vMin> <vMax>");
+      } else {
+        Serial.println(ejecutarComando(c) ? "[CLI] OK limites actualizados"
+                                          : "[CLI] ERROR limites fuera de rango");
+      }
     } else if (strcmp(linea, "rearmar") == 0) {
+      bool huboCorte = estado == CORTE;
       rearmar();
+      if (estado == CORTE) Serial.println("[CLI] ERROR rearme rechazado por fallo del sensor");
+      else Serial.println(huboCorte ? "[CLI] OK rearme realizado" : "[CLI] OK rearme innecesario");
     } else if (strcmp(linea, "cero") == 0) {
-      hacerCero();
+      Serial.println(hacerCero() ? "[CLI] OK cero guardado" : "[CLI] ERROR cero rechazado");
     } else if (strcmp(linea, "carga on") == 0 || strcmp(linea, "carga off") == 0) {
       c.tipo = CMD_CARGA;
       c.on = strcmp(linea, "carga on") == 0;
       ejecutarComando(c);
+      Serial.println(c.on ? "[CLI] OK carga habilitada" : "[CLI] OK carga deshabilitada");
+    } else if (strcmp(linea, "silenciar") == 0) {
+      c.tipo = CMD_SILENCIAR;
+      ejecutarComando(c);
+      Serial.println("[CLI] OK silenciado");
+    } else if (strcmp(linea, "reset_energia") == 0) {
+      c.tipo = CMD_RESET_ENERGIA;
+      ejecutarComando(c);
+      Serial.println("[CLI] OK energia y corriente maxima reiniciadas");
     } else if (strcmp(linea, "estado") == 0) {
-      Serial.printf("Estado %s | %s | carga %s | sensor %s | límites: %s/%s, %.1f-%.1f V | rango %s\n",
+      Serial.printf("[ESTADO] %s | %s | carga %s | sensor %s | límites: %s/%s, %.1f-%.1f V | rango %s\n",
                     estadoTexto(estado), motivo, cargaHabilitada ? "ON" : "OFF",
                     calibrador.sensorOk() ? "OK" : "FALLA", formatoSI(lim.iAlarma, "A").c_str(), formatoSI(lim.iCorte, "A").c_str(), lim.vMin, lim.vMax, formatoSI(iMaxSensor_A, "A").c_str());
+    } else if (strcmp(linea, "ayuda") == 0) {
+      Serial.println("Comandos: estado | medir | datos on | datos off | ping");
+      Serial.println("config ver | config wifi [\"SSID\",\"clave\"] | config id <id>");
+      Serial.println("lim <iA> <iC> <vMin> <vMax> | rearmar | silenciar | cero");
+      Serial.println("carga on | carga off | reset_energia");
     } else {
-      Serial.println("Comandos: estado | lim <iA> <iC> <vMin> <vMax> | rearmar | cero | carga on | carga off");
+      Serial.println("[CLI] ERROR comando desconocido; escribe ayuda");
     }
   }
 }
@@ -400,8 +510,8 @@ void publicarEventosPendientes() {
 
 void tareaRed(void *) {
   WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);   // Los reintentos usan la configuracion UART activa.
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(512);
@@ -409,18 +519,52 @@ void tareaRed(void *) {
   mqtt.setSocketTimeout(5);
   mqtt.setCallback(alRecibirMQTT);
 
-  String clientId = String("esp32-") + DEVICE_ID + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+  ConfigRed activa{};
+  String clientId;
   uint32_t tWifi = millis(), tMqtt = 0, tPub = 0;
   bool avisadoWifi = false;
 
   for (;;) {
+    ConfigRed nueva;
+    if (xQueueReceive(colaConfigRed, &nueva, 0) == pdTRUE) {
+      bool cambiaWifi = strcmp(activa.ssid, nueva.ssid) != 0 || strcmp(activa.clave, nueva.clave) != 0;
+      bool cambiaId = strcmp(activa.id, nueva.id) != 0;
+      if ((cambiaWifi || cambiaId) && mqtt.connected()) {
+        mqtt.publish(tEstado.c_str(), "offline", true);
+        mqtt.disconnect();
+      }
+
+      activa = nueva;
+      if (cambiaId) {
+        String base = String(TOPIC_BASE) + "/" + activa.id;
+        tDatos = base + "/datos";
+        tEstado = base + "/estado";
+        tEvento = base + "/evento";
+        tConfig = base + "/config";
+        tCmd = base + "/cmd";
+        clientId = String("esp32-") + activa.id + "-" + String((uint32_t)ESP.getEfuseMac(), HEX);
+        Serial.printf("[RED] Topico MQTT: %s\n", base.c_str());
+      }
+      if (cambiaWifi) {
+        WiFi.disconnect();
+        WiFi.begin(activa.ssid, activa.clave);
+        tWifi = millis();
+        avisadoWifi = false;
+      }
+      tMqtt = millis() - 5000;
+    }
+
+    if (!activa.ssid[0]) {
+      vTaskDelay(pdMS_TO_TICKS(200));
+      continue;
+    }
     if (WiFi.status() != WL_CONNECTED) {
       avisadoWifi = false;
       if (millis() - tWifi > 15000) {
         tWifi = millis();
         Serial.println("[RED] Reintentando WiFi...");
         WiFi.disconnect();
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
+        WiFi.begin(activa.ssid, activa.clave);
       }
       vTaskDelay(pdMS_TO_TICKS(200));
       continue;
@@ -430,17 +574,21 @@ void tareaRed(void *) {
       avisadoWifi = true;
     }
 
+    if (!activa.id[0]) {
+      vTaskDelay(pdMS_TO_TICKS(200));
+      continue;
+    }
     if (!mqtt.connected()) {
-      if (millis() - tMqtt > 5000) {
+      if (millis() - tMqtt >= 5000) {
         tMqtt = millis();
-        Serial.printf("[RED] Conectando a MQTT %s... ", MQTT_HOST);
+        Serial.printf("[RED] Conectando a MQTT %s...\n", MQTT_HOST);
         if (mqtt.connect(clientId.c_str(), nullptr, nullptr, tEstado.c_str(), 1, true, "offline")) {
-          Serial.println("OK");
+          Serial.println("[RED] MQTT conectado");
           mqtt.publish(tEstado.c_str(), "online", true);
           mqtt.subscribe(tCmd.c_str(), 1);
           configCambiada = true;
         } else {
-          Serial.printf("falló (código %d)\n", mqtt.state());
+          Serial.printf("[RED] Fallo de MQTT (codigo %d)\n", mqtt.state());
         }
       }
     } else {
@@ -488,13 +636,17 @@ void medir() {
   }
 }
 
-void imprimir() {
-  Serial.printf("V_bus: %6.3f V | V_carga: %6.3f V | V_shunt: %7.3f mV | I_cruda: %s | I_cal: %s | P: %s | %s",
-                lec.voltajeBus_V, V, lec.voltajeShunt_mV, formatoSI(lec.corrienteCruda_mA / 1000.0f, "A").c_str(),
-                formatoSI(I, "A").c_str(), formatoSI(P, "W").c_str(), estadoTexto(estado));
-  if (motivo[0]) Serial.printf(" (%s)", motivo);
-  if (!cargaHabilitada) Serial.print(" | carga OFF");
-  Serial.println();
+void imprimir(const char *etiqueta) {
+  const char *carga = cargaHabilitada && estado != CORTE && calibrador.sensorOk() ? "ON" : "OFF";
+  if (!lec.valida) {
+    Serial.printf("%s sin lectura valida | E=%.6f Wh | estado=%s | carga=%s | %s\n",
+                  etiqueta, energiaWh, estadoTexto(estado), carga, motivo);
+    return;
+  }
+  Serial.printf("%s V_bus=%.3f V | V_carga=%.3f V | V_shunt=%.3f mV | I_cruda=%.6f A | "
+                "I_cal=%.6f A | P=%.6f W | E=%.6f Wh | I_max=%.6f A | estado=%s | carga=%s | %s\n",
+                etiqueta, lec.voltajeBus_V, V, lec.voltajeShunt_mV, lec.corrienteCruda_mA / 1000.0f,
+                I, P, energiaWh, iMax, estadoTexto(estado), carga, motivo);
 }
 
 // =============================================================
@@ -505,6 +657,7 @@ void setup() {
   digitalWrite(PIN_CORTE, LOW);          // lo primero: carga desconectada
   calibrador.configurarPines();
 
+  Serial.setRxBufferSize(1024);
   Serial.begin(115200);
   delay(300);
   Serial.println("\n=== Medidor DC - programa principal ===");
@@ -512,12 +665,9 @@ void setup() {
   colaComandos = xQueueCreate(8, sizeof(Comando));
   colaEventos  = xQueueCreate(12, sizeof(Evento));
 
-  String base = String(TOPIC_BASE) + "/" + DEVICE_ID;
-  tDatos  = base + "/datos";
-  tEstado = base + "/estado";
-  tEvento = base + "/evento";
-  tConfig = base + "/config";
-  tCmd    = base + "/cmd";
+  colaConfigRed = xQueueCreate(1, sizeof(ConfigRed));
+  configRed = cargarConfigRed();
+  if (colaConfigRed) xQueueOverwrite(colaConfigRed, &configRed);
 
   // Rango nominal (con el shunt nominal) para validar límites
   iMaxSensor_A = INA219Simple::rangoEn_mV(CalibradorINA219::rangoPGA(RANGO_SENSOR)) / SHUNT_NOMINAL_OHM / 1000.0f;
@@ -528,12 +678,16 @@ void setup() {
   intentarIniciarSensor();
   tReintentoSensor = millis();
 
-  Serial.printf("Tópico MQTT: %s | Límites: alarma %s, corte %s, V %.1f-%.1f V | rango %s\n",
-                base.c_str(), formatoSI(lim.iAlarma, "A").c_str(), formatoSI(lim.iCorte, "A").c_str(), lim.vMin, lim.vMax, formatoSI(iMaxSensor_A, "A").c_str());
+  Serial.printf("Limites: alarma %s, corte %s, V %.1f-%.1f V | rango %s\n",
+                formatoSI(lim.iAlarma, "A").c_str(), formatoSI(lim.iCorte, "A").c_str(),
+                lim.vMin, lim.vMax, formatoSI(iMaxSensor_A, "A").c_str());
   Serial.println("Escribe 'ayuda' para ver los comandos del monitor serie.");
 
   actualizarInstantanea();
-  xTaskCreatePinnedToCore(tareaRed, "red", 8192, nullptr, 1, nullptr, 0);
+  if (!colaConfigRed ||
+      xTaskCreatePinnedToCore(tareaRed, "red", 8192, nullptr, 1, nullptr, 0) != pdPASS) {
+    Serial.println("[RED] ERROR al iniciar la tarea de red");
+  }
 }
 
 void loop() {
@@ -570,9 +724,9 @@ void loop() {
     calibrador.setAlertaExterna(estado != NORMAL);
     actualizarInstantanea();
 
-    if (ahora - tImpresion >= PERIODO_IMPRESION_MS) {
+    if (imprimirPeriodicamente && ahora - tImpresion >= PERIODO_IMPRESION_MS) {
       tImpresion = ahora;
-      imprimir();
+      imprimir("[DATOS]");
     }
   }
 
