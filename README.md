@@ -16,22 +16,16 @@ La versión de GitHub Pages se sirve desde [docs/index.html](docs/index.html). P
 
 1. Extrae el ZIP y abre en VS Code la carpeta que contiene `platformio.ini`. Instala la extensión **PlatformIO IDE** si hace falta.
 2. Conecta el ESP32 con un cable USB de datos. En PlatformIO selecciona **principal → Upload**. Este es el entorno de operación normal. **calibracion** se usa para ajustar el INA219 con un multímetro.
-3. Cierra el monitor serie de VS Code antes de abrir la CLI. Abre **CMD** en la carpeta del proyecto. Si usas la terminal integrada, elige el perfil **Símbolo del sistema**.
-4. Identifica el puerto COM, configura el Wi-Fi y asigna el ID de tu medidor siguiendo los comandos de abajo. La primera carga del firmware instala la CLI en el ESP32. Los cambios posteriores de Wi-Fi e ID se hacen en caliente.
+3. Cierra el monitor serie de VS Code y haz doble clic en **Abrir_Medidor_DC.cmd**, en la carpeta del proyecto.
+4. Cuando aparezca el prompt `medidor>`, configura el Wi-Fi y asigna el ID del equipo. Los cambios de Wi-Fi e ID se aplican sin recompilar.
 
 ## CLI por UART en Windows
 
-### Abrir la consola interactiva
+### Abrir la consola interactiva con doble clic
 
-Una **CLI (Command Line Interface)** recibe comandos escritos y devuelve resultados en texto. En este proyecto, se abre en CMD, mantiene un solo puerto COM conectado y muestra el prompt `medidor>`. Cada línea que escribes ahí se interpreta como un comando del medidor.
+Conecta el ESP32 con el firmware **principal** cargado y cierra el monitor serie de PlatformIO. Haz doble clic en [Abrir_Medidor_DC.cmd](Abrir_Medidor_DC.cmd) para abrir una ventana de CMD. El lanzador busca Python con pyserial, primero en PlatformIO y luego en el Python de Windows.
 
-Ejecuta estas líneas en **CMD** desde la carpeta con `platformio.ini`. Sustituye `COM5` por el puerto que aparezca al conectar la placa.
-
-```cmd
-set "PYPIO=%USERPROFILE%\.platformio\penv\Scripts\python.exe"
-"%PYPIO%" tools\medidor_cli.py puertos
-"%PYPIO%" tools\medidor_cli.py --puerto COM5
-```
+La aplicación comprueba los puertos de los puentes USB‑serie compatibles mediante `ping` a **115200 baud**. Si un puerto responde como el Medidor DC, lo usa automáticamente y muestra `medidor>`. Si hay varios medidores conectados, muestra una lista numerada. La consola conserva la conexión mientras escribes comandos.
 
 Luego, **dentro de la consola** `medidor>`, escribe los comandos de ejemplo siguientes, uno por línea, sin copiar el prompt.
 
@@ -47,7 +41,9 @@ monitor
 
 `wifi` solicita el SSID y luego la contraseña con entrada oculta. En `monitor`, **Ctrl+C** vuelve al prompt y conserva el COM abierto. Escribe `salir` para cerrar la sesión y liberar el puerto.
 
-Para automatizar una consulta puedes ejecutar un comando directamente desde CMD, por ejemplo `"%PYPIO%" tools\medidor_cli.py --puerto COM5 medir`. Si usas otro Python 3.9 o posterior, instala pyserial con `python -m pip install pyserial` y usa `python` en lugar de `"%PYPIO%"`.
+Para abrirla desde **CMD** también puedes ejecutar `Abrir_Medidor_DC.cmd`. Para lanzar una consulta individual, usa `Abrir_Medidor_DC.cmd medir`. Con un adaptador USB‑serie que la detección automática no reconoce, identifica el puerto con `Abrir_Medidor_DC.cmd puertos` y especifica el puerto solo en ese caso, por ejemplo `Abrir_Medidor_DC.cmd --puerto COM5`.
+
+Si el lanzador indica que falta pyserial, instala PlatformIO IDE o ejecuta `py -3 -m pip install pyserial` en un Python 3.9 o posterior.
 
 | Comando en `medidor>` | Función |
 | --- | --- |
@@ -146,6 +142,7 @@ El ESP32 se conecta a `broker.hivemq.com:1883`. El navegador usa `wss://broker.h
 | [src/principal/](src/principal/) | Medición, protecciones, parser UART, configuración NVS y tarea Wi-Fi/MQTT. |
 | [src/calibracion/](src/calibracion/) | Firmware de calibración por serie. |
 | [lib/INA219Simple/](lib/INA219Simple/) y [lib/CalibradorINA219/](lib/CalibradorINA219/) | Lectura del sensor, calibración, botón, LED y buzzer. |
+| [Abrir_Medidor_DC.cmd](Abrir_Medidor_DC.cmd) | Lanzador de Windows de doble clic con detección automática del puerto. |
 | [tools/medidor_cli.py](tools/medidor_cli.py) | Consola interactiva y cliente de comandos individuales por UART. |
 | [docs/index.html](docs/index.html) y [web/index.html](web/index.html) | Monitor para GitHub Pages y copia para abrir localmente. |
 
@@ -153,8 +150,8 @@ El ESP32 se conecta a `broker.hivemq.com:1883`. El navegador usa `wss://broker.h
 
 | Síntoma | Comprobación |
 | --- | --- |
-| El COM no aparece | Prueba un cable USB de datos y compara la lista de puertos con la placa desconectada y conectada. |
+| El lanzador no encuentra el ESP32 | Prueba un cable USB de datos, comprueba el controlador USB‑serie y compara la lista de `Abrir_Medidor_DC.cmd puertos` con la placa desconectada y conectada. |
 | Puerto ocupado | Cierra el monitor de PlatformIO o sal de `monitor` con **Ctrl+C**. |
-| El COM existe pero la CLI no responde | Confirma `COMx` y que cargaste **principal**. Con un terminal serie a 115200 baud, envía `ping`. |
+| El COM aparece pero la detección no lo usa | Comprueba que cargaste **principal** y prueba `Abrir_Medidor_DC.cmd --puerto COMx`. Con un terminal serie a 115200 baud, envía `ping`. |
 | Hay lecturas por UART pero la web muestra el equipo fuera de línea | Comprueba el SSID de 2,4 GHz, el acceso a internet e igualdad exacta del ID. Busca `[RED] MQTT conectado` en `monitor`. |
 | El monitor web enlaza pero no hay lecturas válidas | En la CLI revisa `estado` y `medir`. Si el sensor falla, comprueba SDA, SCL, 3,3 V y GND. |

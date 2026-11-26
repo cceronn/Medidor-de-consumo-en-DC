@@ -1,6 +1,7 @@
 """Consola del Medidor DC por UART."""
 
 import argparse
+from contextlib import ExitStack
 import getpass
 import json
 import math
@@ -96,19 +97,77 @@ def agregar_comandos(parser, interactiva):
 
 def argumentos():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--puerto", help="Puerto serie, por ejemplo COM5")
+    parser.add_argument("--puerto", help="Puerto serie manual; por defecto se detecta el medidor")
     agregar_comandos(parser, interactiva=False)
     args = parser.parse_args()
     if args.accion is None:
         args.accion = "consola"
-    if args.accion != "puertos" and not args.puerto:
-        parser.error("indica --puerto COMx antes del comando")
     return args
 
 
 def listar_puertos():
     for puerto in sorted(list_ports.comports()):
         print(f"{puerto.device}: {puerto.description}")
+
+
+def abrir_puerto(conexiones, nombre):
+    puerto = conexiones.enter_context(serial.Serial(baudrate=115200, timeout=0.2, write_timeout=1))
+    puerto.dtr = False
+    puerto.rts = False
+    puerto.port = nombre
+    puerto.open()
+    return puerto
+
+
+def elegir_medidor(medidores):
+    if len(medidores) == 1:
+        return medidores[0]
+    if not sys.stdin.isatty():
+        raise ValueError("Hay varios medidores conectados. Especifica --puerto COMx.")
+
+    print("Se detectaron varios medidores:")
+    for indice, puerto in enumerate(medidores, start=1):
+        print(f"  {indice}. {puerto.port}")
+    while True:
+        opcion = input("Elige un medidor: ").strip()
+        try:
+            indice = int(opcion)
+        except ValueError:
+            continue
+        if 1 <= indice <= len(medidores):
+            return medidores[indice - 1]
+
+
+def detectar_medidor(conexiones):
+    # Identificadores de los puentes USB-UART más comunes en placas ESP32.
+    fabricantes = {0x10C4, 0x1A86, 0x0403, 0x067B, 0x303A}
+    candidatos = [p for p in sorted(list_ports.comports()) if p.vid in fabricantes]
+    if not candidatos:
+        raise ValueError("No encontré un puente USB-serial de ESP32. Revisa el cable de datos y el driver. "
+                         "Para otro adaptador usa --puerto COMx.")
+    print("Buscando el Medidor DC...", flush=True)
+    medidores = []
+    fallos = []
+    for info in candidatos:
+        with ExitStack() as prueba:
+            try:
+                puerto = abrir_puerto(prueba, info.device)
+                sincronizar(puerto)
+            except (OSError, ValueError) as error:
+                fallos.append(f"{info.device}: {error}")
+            else:
+                conexiones.enter_context(prueba.pop_all())
+                medidores.append(puerto)
+
+    if not medidores:
+        detalle = "\\n".join(fallos)
+        raise ValueError(f"Ningún puerto respondió como Medidor DC. Cierra el monitor serie "
+                         f"y comprueba que cargaste el firmware principal.\\n{detalle}")
+    elegido = elegir_medidor(medidores)
+    for puerto in medidores:
+        if puerto is not elegido:
+            puerto.close()
+    return elegido
 
 
 def monitor(puerto, filtro):
@@ -199,13 +258,13 @@ def main():
         return 0
 
     try:
-        with serial.Serial(baudrate=115200, timeout=0.2, write_timeout=1) as puerto:
-            puerto.dtr = False
-            puerto.rts = False
-            puerto.port = args.puerto
-            puerto.open()
-            if args.accion != "monitor":
-                sincronizar(puerto)
+        with ExitStack() as conexiones:
+            if args.puerto:
+                puerto = abrir_puerto(conexiones, args.puerto)
+                if args.accion != "monitor":
+                    sincronizar(puerto)
+            else:
+                puerto = detectar_medidor(conexiones)
             if args.accion == "consola":
                 consola(puerto)
             else:
